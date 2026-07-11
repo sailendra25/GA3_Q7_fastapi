@@ -2,14 +2,14 @@ import json
 import os
 
 from fastapi import FastAPI, HTTPException
-from openai import OpenAI
+from google import genai
 from pydantic import BaseModel
 
 app = FastAPI(title="Invoice Intelligence API")
 
+api_key = os.getenv("GEMINI_API_KEY")
 
-# OpenAI client
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = genai.Client(api_key=api_key) if api_key else None
 
 
 class ExtractRequest(BaseModel):
@@ -39,19 +39,15 @@ def home():
 
 def validate_output(data: dict):
 
-    # Exact key validation
     if set(data.keys()) != EXPECTED_KEYS:
-        raise ValueError(f"Unexpected keys: {list(data.keys())}")
+        raise ValueError(
+            f"Expected keys {EXPECTED_KEYS}, got {set(data.keys())}"
+        )
 
-    # Normalize email
-    if data.get("contact_email"):
-        data["contact_email"] = data["contact_email"].lower().strip()
+    data["contact_email"] = data["contact_email"].lower()
 
-    # Ensure integer values
     data["total_amount"] = int(data["total_amount"])
-
     data["due_in_days"] = int(data["due_in_days"])
-
     data["item_count"] = int(data["item_count"])
 
     for item in data["line_items"]:
@@ -62,21 +58,30 @@ def validate_output(data: dict):
 
 
 @app.post("/extract")
-async def extract_invoice(req: ExtractRequest):
+async def extract(req: ExtractRequest):
 
-    if not os.getenv("OPENAI_API_KEY"):
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY missing")
+    if client is None:
+        raise HTTPException(
+            status_code=500,
+            detail="GEMINI_API_KEY missing",
+        )
 
     prompt = f"""
 You are an invoice extraction engine.
 
-Extract structured invoice information from the document.
+Extract the invoice into JSON.
 
-Follow these rules exactly:
+Return ONLY valid JSON.
 
-- vendor: biller's proper name exactly as written
-- currency: ISO 4217 code
-- total_amount: integer in main currency unit
+It MUST exactly match this JSON Schema:
+
+{json.dumps(req.schema)}
+
+Rules:
+
+- vendor: exactly as written
+- currency: ISO4217 code
+- total_amount: integer
 - invoice_date: YYYY-MM-DD
 - due_in_days: integer
 - is_paid: boolean
@@ -85,32 +90,29 @@ Follow these rules exactly:
 - line_items: preserve order
 - item_count: number of line items
 
-Return ONLY JSON matching the supplied JSON schema.
-
-Invoice document:
+Invoice:
 
 {req.text}
 """
 
     try:
-        response = client.responses.create(
-            model="gpt-5-mini",
-            input=prompt,
-            text={
-                "format": {
-                    "type": "json_schema",
-                    "name": "invoice_extraction",
-                    "schema": req.schema,
-                    "strict": True,
-                }
-            },
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
         )
 
-        result = json.loads(response.output_text)
+        text = response.text.strip()
 
-        result = validate_output(result)
+        # remove markdown if Gemini returns it
+        text = text.replace("```json", "").replace("```", "").strip()
 
-        return result
+        result = json.loads(text)
+
+        return validate_output(result)
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=str(e),
+        )
