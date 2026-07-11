@@ -94,7 +94,7 @@ Invoice document:
 
     try:
         response = client.responses.create(
-            model="gpt-5.5-mini",
+            model="gpt-5-mini",
             input=prompt,
             text={
                 "format": {
